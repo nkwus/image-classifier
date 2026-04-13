@@ -6,7 +6,9 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
+from image_classifier.annotate import annotate_image
 from image_classifier.capture import save_frame
+from image_classifier.classify import classify_food
 
 WINDOW_NAME = "Webcam - press s=save  q=quit"
 
@@ -42,9 +44,11 @@ def capture_from_webcam(device: int = 0) -> None:
             if key == ord("q"):
                 break
             elif key == ord("s"):
-                output_path = save_frame(frame)
+                label, confidence = classify_food(frame)
+                annotated = annotate_image(frame, label, confidence)
+                output_path = save_frame(annotated)
                 if output_path is not None:
-                    print(f"Saved: {output_path}")
+                    print(f"Saved: {output_path} — {label} ({confidence:.1%})")
                 else:
                     print("Error: could not write capture", file=sys.stderr)
     finally:
