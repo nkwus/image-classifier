@@ -55,6 +55,18 @@ async def submit_classification(file: UploadFile, request: Request) -> Response:
     return JSONResponse(status_code=202, content=body.model_dump())
 
 
+@router.get("/jobs", response_model=list[JobResponse])
+async def list_jobs(request: Request) -> Response:
+    """Return all active classification jobs."""
+    redis_sync = request.app.state.redis_sync
+    all_jobs = await asyncio.to_thread(jobs.list_jobs, redis_sync)
+    responses = [JobResponse.model_validate_json(json.dumps(j)) for j in all_jobs]
+    return JSONResponse(
+        status_code=200,
+        content=[r.model_dump() for r in responses],
+    )
+
+
 @router.get("/jobs/{job_id}", response_model=JobResponse)
 async def get_job_status(job_id: str, request: Request) -> Response:
     """Return the current state of a classification job."""
@@ -95,3 +107,11 @@ async def delete_job(job_id: str, request: Request) -> Response:
     redis_sync = request.app.state.redis_sync
     await asyncio.to_thread(jobs.delete_job, redis_sync, job_id)
     return Response(status_code=204)
+
+
+@router.delete("/jobs", status_code=200)
+async def delete_all_jobs(request: Request) -> Response:
+    """Delete all jobs and their result images."""
+    redis_sync = request.app.state.redis_sync
+    count = await asyncio.to_thread(jobs.delete_all_jobs, redis_sync)
+    return JSONResponse(status_code=200, content={"deleted": count})

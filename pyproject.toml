@@ -1,13 +1,12 @@
 [project]
 name = "image-classifier"
 version = "0.1.0"
-description = "Webcam capture and image saving utilities"
+description = "Food classification API server using zero-shot image classification"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
-    "httpx>=0.27",
-    "opencv-python>=4.10",
+    "opencv-python-headless>=4.10",
     "Pillow>=10.0",
     "protobuf>=5.0",
     "pydantic>=2.0",

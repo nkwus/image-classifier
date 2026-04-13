@@ -99,3 +99,36 @@ def get_result_image(r: redis_mod.Redis[bytes], job_id: str) -> bytes | None:
 def delete_job(r: redis_mod.Redis[bytes], job_id: str) -> None:
     """Remove a job and its result image from Redis."""
     r.delete(f"job:{job_id}", f"job:{job_id}:image")
+
+
+def list_jobs(r: redis_mod.Redis[bytes]) -> list[dict[str, Any]]:
+    """Return metadata for all active jobs (those matching ``job:*``)."""
+    results: list[dict[str, Any]] = []
+    cursor: int = 0
+    while True:
+        cursor, keys = r.scan(cursor=cursor, match="job:*", count=100)  # type: ignore[assignment]
+        for key in keys:
+            key_str = key.decode() if isinstance(key, bytes) else key
+            # Skip image keys
+            if key_str.endswith(":image"):
+                continue
+            job_id = key_str.removeprefix("job:")
+            job = get_job(r, job_id)
+            if job is not None:
+                results.append(job)
+        if cursor == 0:
+            break
+    return results
+
+
+def delete_all_jobs(r: redis_mod.Redis[bytes]) -> int:
+    """Delete all job keys (hashes and images). Returns the count deleted."""
+    count = 0
+    cursor: int = 0
+    while True:
+        cursor, keys = r.scan(cursor=cursor, match="job:*", count=100)  # type: ignore[assignment]
+        if keys:
+            count += r.delete(*keys)  # type: ignore[assignment]
+        if cursor == 0:
+            break
+    return count

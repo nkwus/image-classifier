@@ -1,18 +1,13 @@
 # image-classifier
 
-Webcam capture tool that opens a live camera preview, classifies food in the frame using zero-shot image classification ([google/siglip-so400m-patch14-384](https://huggingface.co/google/siglip-so400m-patch14-384) — SigLIP vision-language model), and saves annotated PNG images with the food label and confidence score overlaid. Candidate labels can be fetched from the [USDA FoodData Central API](https://fdc.nal.usda.gov/api-guide) for broad food coverage, or you can supply your own. Built with OpenCV and HuggingFace Transformers, and packaged as an installable Python library.
+Food classification REST API that accepts images and classifies them using zero-shot image classification ([google/siglip-so400m-patch14-384](https://huggingface.co/google/siglip-so400m-patch14-384) — SigLIP vision-language model). Returns annotated PNG images with the food label and confidence score overlaid. Candidate labels can be fetched from the [USDA FoodData Central API](https://fdc.nal.usda.gov/api-guide) for broad food coverage. Built with FastAPI, OpenCV, Redis, and HuggingFace Transformers, designed to run in a Docker container.
 
 ## Prerequisites
 
 - **Python 3.12+**
-- **A webcam** accessible at `/dev/video0` (the default V4L2 device on Linux) — only needed for the camera frontend
 - **[uv](https://docs.astral.sh/uv/)** (recommended) or pip
 - **A [Redis](https://redis.io/) instance** — the API server uses Redis to store job state and result images (a [Redis Cloud](https://redis.io/cloud/) free tier works fine)
 - **(Optional) A [USDA FoodData Central API key](https://fdc.nal.usda.gov/api-key-signup)** — required only for fetching an expanded food label list from the USDA
-
-### Linux display server note
-
-This project runs on both X11 and Wayland desktops. On Wayland the CLI automatically forces X11/XCB mode via XWayland because the `opencv-python` wheel does not bundle a Wayland Qt plugin. See [_qt_fixups.py](#qt--xwayland-workarounds) below for details.
 
 ## Setup
 
@@ -39,106 +34,70 @@ The `REDIS_URL`, `REDIS_USERNAME`, and `REDIS_PASSWORD` variables are required f
 
 The CLI loads `.env` automatically via `python-dotenv`. The VS Code workspace is also configured (`python.envFile`) so the Python extension picks up these variables for debugging, testing, and Pylance.
 
-If the OpenCV preview window fonts produce warnings about a missing font directory, symlink system fonts into the wheel's expected path:
-
-```bash
-rmdir .venv/lib/python3.12/site-packages/cv2/qt/fonts
-ln -s /usr/share/fonts/truetype .venv/lib/python3.12/site-packages/cv2/qt/fonts
-```
-
 ## Usage
 
-### Architecture
+### API
 
-The application is split into a **FastAPI backend** (classification API server) and a **thin frontend** (webcam client). They communicate over HTTP using an async job queue pattern:
+The server exposes a REST API using an async job queue pattern:
 
-1. The client submits an image to `POST /classify` and receives a job ID (202 Accepted)
-2. The client polls `GET /jobs/{job_id}` until the job completes (with progress % and ETA)
-3. The client downloads the annotated image from `GET /jobs/{job_id}/image`
-
-This separation allows a web frontend to replace the camera client in the future.
+1. Submit an image to `POST /classify` → receive a job ID (202 Accepted)
+2. Poll `GET /jobs/{job_id}` until the job completes (with progress % and ETA)
+3. Download the annotated image from `GET /jobs/{job_id}/image`
 
 ### Command line
 
 ```bash
-# Start the classification API server:
-uv run image-classifier serve
-uv run image-classifier serve --host 0.0.0.0 --port 9000
-
-# Launch the webcam preview window (connects to the API server):
+# Start the classification API server (default: 0.0.0.0:8000):
 uv run image-classifier
-python -m image_classifier
-
-# Set a custom API server URL for the camera client:
-CLASSIFIER_API_URL=http://192.168.1.10:8000 uv run image-classifier
+uv run image-classifier --host 127.0.0.1 --port 9000
 
 # Fetch food labels from the USDA FoodData Central API and cache them:
 uv run image-classifier --fetch-labels
 ```
 
-The `serve` subcommand starts a uvicorn server that loads the SigLIP model, connects to Redis, and exposes the REST API. The camera client defaults to `http://127.0.0.1:8000` but can be pointed at any server via the `CLASSIFIER_API_URL` environment variable.
-
 The `--fetch-labels` flag pages through the USDA `/foods/list` endpoint (Foundation and SR Legacy data types), collects all food descriptions, and caches them as JSON in `~/.cache/image-classifier/usda_labels.json`. The API key is read from `FDA_API_KEY` in `.env` (or from the environment). The USDA rate limit is 1,000 requests per hour per API key.
 
 Once cached, the USDA labels are used automatically as the candidate label set for zero-shot classification. If no cache exists, the built-in Food-101 label list is used as a fallback.
 
-| Key | Action                                                                                     |
-| --- | ------------------------------------------------------------------------------------------ |
-| `s` | Classify the food in the current frame, overlay the result, and save as PNG to `captures/` |
-| `q` | Quit the preview and release the camera                                                    |
-
-Saved files are named `capture_YYYYMMDD_HHMMSS.png` (e.g. `capture_20260412_153045.png`). Each saved PNG has the predicted food label and confidence percentage rendered in the top-left corner. The `captures/` directory is created automatically on first save and is git-ignored.
-
 The SigLIP model is downloaded from HuggingFace Hub on first use and cached locally (~3.5 GB).
+
+### Docker
+
+```bash
+docker build -t image-classifier .
+docker run -p 8000:8000 --env-file .env image-classifier
+```
 
 ### As a library
 
 ```python
-from pathlib import Path
-
 import cv2
-from image_classifier import annotate_image, classify_food, save_frame
+from image_classifier import annotate_image, classify_food
 
-cap = cv2.VideoCapture(0)
-_, frame = cap.read()
-cap.release()
+frame = cv2.imread("photo.jpg")
 
-# Classify and annotate
 label, confidence = classify_food(frame)
 annotated = annotate_image(frame, label, confidence)
 
-# Save the annotated image
-path = save_frame(annotated, output_dir=Path("my_images"))
-print(f"{path} — {label} ({confidence:.1%})")
+cv2.imwrite("result.png", annotated)
+print(f"{label} ({confidence:.1%})")
 ```
 
 The public API exported from `image_classifier` is:
 
-| Symbol                                     | Type     | Description                                                            |
-| ------------------------------------------ | -------- | ---------------------------------------------------------------------- |
-| `classify_food(image, candidate_labels=…)` | function | Zero-shot classify a BGR image as a food item → `(label, confidence)`  |
-| `annotate_image(image, label, confidence)` | function | Return a copy with label/confidence drawn in top-left                  |
-| `save_frame(frame, output_dir=...)`        | function | Save a numpy frame as a timestamped PNG                                |
-| `capture_from_webcam(device=0)`            | function | Open a live preview window with save/quit keys                         |
-| `DEFAULT_CAPTURES_DIR`                     | `Path`   | Default output directory (`captures/`)                                 |
-| `ClassifierClient(base_url)`               | class    | HTTP client for the classification API (submit, poll, wait_for_result) |
-
-> **Important:** When using `capture_from_webcam` from your own code, call `image_classifier._qt_fixups.apply()` before import if you are on Wayland. The CLI handles this automatically, but the library intentionally does not override your Qt environment on import.
+| Symbol                                     | Type     | Description                                                           |
+| ------------------------------------------ | -------- | --------------------------------------------------------------------- |
+| `classify_food(image, candidate_labels=…)` | function | Zero-shot classify a BGR image as a food item → `(label, confidence)` |
+| `annotate_image(image, label, confidence)` | function | Return a copy with label/confidence drawn in top-left                 |
 
 ## Project structure
 
 ```
 image_classifier/
     __init__.py       Public API exports
-    __main__.py       python -m entry point
-    _cli.py           Console script entry point (camera + serve subcommand)
-    _qt_fixups.py     Qt/XWayland environment workarounds
+    _cli.py           Console script entry point (server + fetch-labels)
     annotate.py       Draw classification results onto an image
-    api_client.py     HTTP client for the classification API
-    camera.py         Webcam preview loop (uses API client)
-    capture.py        Frame-to-PNG saving logic
     classify.py       Food classification using a pretrained model
-    client_models.py  Client-side Pydantic models (independent of server)
     usda.py           USDA FoodData Central API client and label cache
     server/
         __init__.py   Package marker
@@ -150,19 +109,14 @@ image_classifier/
 tests/
     conftest.py           Shared test fixtures (fakeredis)
     test_annotate.py      Image annotation tests
-    test_api_client.py    ClassifierClient tests (httpx mocked)
-    test_camera.py        Webcam loop tests (camera and UI fully mocked)
-    test_capture.py       save_frame tests (real filesystem via tmp_path)
     test_classify.py      Food classification tests (model mocked)
-    test_cli.py           CLI entry point tests (including serve subcommand)
-    test_client_models.py Client-side Pydantic model validation tests
-    test_main_module.py   python -m entry point test
-    test_qt_fixups.py     Qt fixup tests
+    test_cli.py           CLI entry point tests
     test_server_jobs.py   Redis job store tests (fakeredis)
     test_server_models.py Server-side Pydantic model validation tests
     test_server_routes.py FastAPI route integration tests
     test_server_tasks.py  Background task tests
     test_usda.py          USDA API client tests (HTTP fully mocked)
+Dockerfile                Container image definition
 pyproject.toml            Package metadata, dependencies, build config
 .env                      API keys and Redis credentials (git-ignored)
 ```
@@ -173,31 +127,14 @@ pyproject.toml            Package metadata, dependencies, build config
 
 Each module has a single responsibility:
 
-- **`capture.py`** handles saving a numpy array to disk as PNG. It knows nothing about cameras or windows. This makes it easy to test (no mocking of UI) and reusable in any pipeline that produces frames.
 - **`classify.py`** wraps a HuggingFace `transformers` zero-shot image-classification pipeline using the SigLIP vision-language model. Instead of a model fine-tuned on fixed classes, the zero-shot approach compares the image embedding against text embeddings for each candidate label — so you can change the label set at runtime without retraining. When no explicit labels are passed, it checks for cached USDA labels (see `usda.py`) and falls back to the built-in Food-101 list. When the candidate list exceeds 100 labels, classification is batched (100 labels per batch) to avoid GPU out-of-memory errors; a `tqdm` progress bar tracks batch progress. The `transformers` library emits a noisy "sequential pipeline on GPU" warning for each batch — this is suppressed by temporarily raising the log level on `transformers.pipelines.base` during the classification loop. SigLIP's tokenizer (`SiglipTokenizer`) uses SentencePiece models serialised with Protocol Buffers, so `sentencepiece` and `protobuf` are both required at runtime. The model is loaded lazily on first use (via `_get_classifier`) and cached for the lifetime of the process. The deferred `from transformers import pipeline` inside `_create_pipeline` keeps `torch` out of the import graph until classification is actually requested, so startup stays fast.
 - **`usda.py`** fetches food descriptions from the [USDA FoodData Central API](https://fdc.nal.usda.gov/api-guide) and caches them as a JSON file (`~/.cache/image-classifier/usda_labels.json`). It uses the POST `/v1/foods/list` endpoint, paging through Foundation and SR Legacy data types at 200 items per page (the API maximum). The API key is sent via the `X-Api-Key` HTTP header rather than as a query parameter so it does not leak into URLs or server logs. `load_cached_labels()` is the only function called at classification time — it reads from disk with no network access. The fetching is triggered explicitly by `--fetch-labels`.
 - **`annotate.py`** draws a label and confidence string onto the top-left corner of an image using OpenCV's `putText` with a solid black background rectangle for readability. Returns a copy — the original frame is never modified.
-- **`camera.py`** handles the webcam read loop and the OpenCV preview window. On save it submits the frame to the API server via `ClassifierClient`, polls for the result, decodes the annotated image, and saves it to disk.
-- **`api_client.py`** provides `ClassifierClient`, a synchronous `httpx`-based HTTP client that wraps the REST API (submit, poll, get image, wait for result). It uses `client_models.py` for response validation.
-- **`client_models.py`** defines Pydantic models for API responses on the client side. These are independent of the server models — the only contract is the JSON schema.
 - **`server/app.py`** creates the FastAPI instance with a lifespan hook that connects to Redis, creates a `ThreadPoolExecutor` (single worker for the non-thread-safe SigLIP model), and pre-loads the model.
 - **`server/routes.py`** contains thin HTTP route handlers that validate requests, dispatch background tasks, and format responses. All Redis calls are wrapped in `asyncio.to_thread()` to avoid blocking the event loop.
 - **`server/jobs.py`** is a synchronous Redis-backed job store. Jobs are stored as Redis hashes with a 1-hour TTL. Result images are stored as separate keys.
 - **`server/tasks.py`** orchestrates background classification: decode image → classify → annotate → store result. It updates job progress (10% → 80% → 100%) and tracks an EMA rolling average of inference duration for ETA estimation.
-- **`_qt_fixups.py`** contains environment variable overrides needed to make OpenCV's bundled Qt work on Wayland/XWayland. It is isolated in its own module so that library consumers are not affected — the fixups are only applied at CLI entry points (`_cli.py` and `__main__.py`), not on `import image_classifier`.
-- **`_cli.py`** and **`__main__.py`** are thin wrappers that load `.env` via `python-dotenv`, parse CLI arguments, apply the Qt fixups, and launch the camera or fetch USDA labels. The underscore prefix on `_cli` and `_qt_fixups` signals these are internal implementation details, not part of the public API.
-
-### Why `WINDOW_GUI_NORMAL`?
-
-OpenCV's default `imshow` uses a Qt-based rendering path (`WINDOW_GUI_EXPANDED`) that produces a black preview window under XWayland. `WINDOW_GUI_NORMAL` forces the classic rendering path which works reliably.
-
-### Qt / XWayland workarounds
-
-The `opencv-python` PyPI wheel bundles its own Qt build, but only includes the XCB (X11) platform plugin — no Wayland plugin. On Wayland desktops the shell usually exports `QT_QPA_PLATFORM=wayland`, which makes Qt fail because the plugin is missing.
-
-`_qt_fixups.py` force-sets `QT_QPA_PLATFORM=xcb` before OpenCV is imported. This routes the window through XWayland, which is available on all modern Wayland compositors.
-
-The font directory symlink (see [Setup](#setup)) is a separate issue: Qt looks for fonts at a hardcoded path inside the wheel that ships empty.
+- **`_cli.py`** is a thin wrapper that loads `.env` via `python-dotenv`, parses CLI arguments, and starts the uvicorn server or fetches USDA labels. The underscore prefix signals it is an internal implementation detail, not part of the public API.
 
 ### Why timestamped filenames?
 

@@ -151,3 +151,40 @@ class TestDeleteJob:
         client.delete("/jobs/j1")
         resp = client.get("/jobs/j1")
         assert resp.status_code == 404
+
+
+class TestListJobs:
+    def test_empty_list(self) -> None:
+        client = _setup_app()
+        resp = client.get("/jobs")
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    def test_returns_all_jobs(self) -> None:
+        client = _setup_app()
+        r = client.app.state.redis_sync
+        create_job(r, "j1")
+        create_job(r, "j2")
+        resp = client.get("/jobs")
+        assert resp.status_code == 200
+        ids = {j["job_id"] for j in resp.json()}
+        assert ids == {"j1", "j2"}
+
+
+class TestDeleteAllJobs:
+    def test_deletes_all_and_returns_count(self) -> None:
+        client = _setup_app()
+        r = client.app.state.redis_sync
+        create_job(r, "j1")
+        create_job(r, "j2")
+        store_result_image(r, "j1", b"png")
+        resp = client.delete("/jobs")
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] == 3
+        assert client.get("/jobs").json() == []
+
+    def test_empty_returns_zero(self) -> None:
+        client = _setup_app()
+        resp = client.delete("/jobs")
+        assert resp.status_code == 200
+        assert resp.json()["deleted"] == 0

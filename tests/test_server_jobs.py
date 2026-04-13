@@ -6,9 +6,11 @@ import redis as redis_mod
 
 from image_classifier.server.jobs import (
     create_job,
+    delete_all_jobs,
     delete_job,
     get_job,
     get_result_image,
+    list_jobs,
     store_result_image,
     update_job,
 )
@@ -89,3 +91,38 @@ class TestDeleteJob:
         delete_job(fake_redis, "job1")
         assert get_job(fake_redis, "job1") is None
         assert get_result_image(fake_redis, "job1") is None
+
+
+class TestListJobs:
+    def test_empty_when_no_jobs(self, fake_redis: redis_mod.Redis[bytes]) -> None:
+        assert list_jobs(fake_redis) == []
+
+    def test_returns_all_active_jobs(self, fake_redis: redis_mod.Redis[bytes]) -> None:
+        create_job(fake_redis, "job1")
+        create_job(fake_redis, "job2")
+        update_job(fake_redis, "job1", status="running")
+        result = list_jobs(fake_redis)
+        ids = {j["job_id"] for j in result}
+        assert ids == {"job1", "job2"}
+
+    def test_excludes_image_keys(self, fake_redis: redis_mod.Redis[bytes]) -> None:
+        create_job(fake_redis, "job1")
+        store_result_image(fake_redis, "job1", b"img")
+        result = list_jobs(fake_redis)
+        assert len(result) == 1
+        assert result[0]["job_id"] == "job1"
+
+
+class TestDeleteAllJobs:
+    def test_deletes_all_jobs_and_images(self, fake_redis: redis_mod.Redis[bytes]) -> None:
+        create_job(fake_redis, "job1")
+        create_job(fake_redis, "job2")
+        store_result_image(fake_redis, "job1", b"img")
+        count = delete_all_jobs(fake_redis)
+        assert count == 3  # 2 job hashes + 1 image key
+        assert get_job(fake_redis, "job1") is None
+        assert get_job(fake_redis, "job2") is None
+        assert get_result_image(fake_redis, "job1") is None
+
+    def test_returns_zero_when_empty(self, fake_redis: redis_mod.Redis[bytes]) -> None:
+        assert delete_all_jobs(fake_redis) == 0

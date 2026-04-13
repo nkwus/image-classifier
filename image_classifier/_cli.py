@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from image_classifier import _qt_fixups
-
 
 def main() -> None:
     from dotenv import load_dotenv
@@ -14,9 +12,8 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
         prog="image-classifier",
-        description="Webcam food classifier with zero-shot image classification.",
+        description="Food classification API server using zero-shot image classification.",
     )
-    subparsers = parser.add_subparsers(dest="command")
 
     parser.add_argument(
         "--fetch-labels",
@@ -24,9 +21,8 @@ def main() -> None:
         help="Fetch food labels from the USDA FoodData Central API and cache them.",
     )
 
-    serve_parser = subparsers.add_parser("serve", help="Start the classification API server.")
-    serve_parser.add_argument("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)")
-    serve_parser.add_argument("--port", type=int, default=8000, help="Bind port (default: 8000)")
+    parser.add_argument("--host", default="0.0.0.0", help="Bind address (default: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=8000, help="Bind port (default: 8000)")
 
     args = parser.parse_args()
 
@@ -36,18 +32,10 @@ def main() -> None:
         fetch_and_cache_labels()
         return
 
-    if args.command == "serve":
-        import uvicorn
+    import uvicorn
 
-        uvicorn.run(
-            "image_classifier.server.app:app",
-            host=args.host,
-            port=args.port,
-        )
-        return
-
-    _qt_fixups.apply()
-
-    from image_classifier.camera import capture_from_webcam
-
-    capture_from_webcam()
+    uvicorn.run(
+        "image_classifier.server.app:app",
+        host=args.host,
+        port=args.port,
+    )
