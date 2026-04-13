@@ -5,6 +5,7 @@
 		}
 	],
 	"settings": {
-		"python.envFile": "${workspaceFolder}/.env"
+		"python.envFile": "${workspaceFolder}/.env",
+		"python.terminal.useEnvFile": true
 	}
 }

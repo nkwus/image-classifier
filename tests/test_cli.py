@@ -43,3 +43,33 @@ class TestCli:
             main()
 
         mock_dotenv.assert_called_once()
+
+    def test_serve_subcommand(self) -> None:
+        mock_uvicorn = MagicMock()
+        with (
+            patch("dotenv.load_dotenv"),
+            patch("sys.argv", ["image-classifier", "serve", "--host", "0.0.0.0", "--port", "9000"]),
+            patch("uvicorn.run", mock_uvicorn),
+        ):
+            main()
+
+        mock_uvicorn.assert_called_once_with(
+            "image_classifier.server.app:app",
+            host="0.0.0.0",
+            port=9000,
+        )
+
+    def test_serve_subcommand_defaults(self) -> None:
+        mock_uvicorn = MagicMock()
+        with (
+            patch("dotenv.load_dotenv"),
+            patch("sys.argv", ["image-classifier", "serve"]),
+            patch("uvicorn.run", mock_uvicorn),
+        ):
+            main()
+
+        mock_uvicorn.assert_called_once_with(
+            "image_classifier.server.app:app",
+            host="127.0.0.1",
+            port=8000,
+        )

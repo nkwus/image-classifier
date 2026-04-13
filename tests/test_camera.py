@@ -25,6 +25,7 @@ class TestCaptureFromWebcam:
 
         with (
             patch(f"{_CAMERA_MODULE}.cv2.VideoCapture", return_value=mock_cap),
+            patch(f"{_CAMERA_MODULE}.ClassifierClient"),
             pytest.raises(SystemExit, match="1"),
         ):
             capture_from_webcam()
@@ -40,14 +41,18 @@ class TestCaptureFromWebcam:
             patch(f"{_CAMERA_MODULE}.cv2.imshow"),
             patch(f"{_CAMERA_MODULE}.cv2.waitKey", return_value=ord("q")),
             patch(f"{_CAMERA_MODULE}.cv2.destroyAllWindows"),
+            patch(f"{_CAMERA_MODULE}.ClassifierClient") as mock_client_cls,
             patch(f"{_CAMERA_MODULE}.threading.Thread") as mock_thread_cls,
         ):
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
             mock_thread = MagicMock()
             mock_thread_cls.return_value = mock_thread
             capture_from_webcam()
 
         mock_cap.release.assert_called_once()
         mock_thread.join.assert_called_once()
+        mock_client.close.assert_called_once()
 
     def test_save_key_enqueues_frame(self) -> None:
         mock_cap = MagicMock()
@@ -63,6 +68,7 @@ class TestCaptureFromWebcam:
             patch(f"{_CAMERA_MODULE}.cv2.imshow"),
             patch(f"{_CAMERA_MODULE}.cv2.waitKey", side_effect=wait_returns),
             patch(f"{_CAMERA_MODULE}.cv2.destroyAllWindows"),
+            patch(f"{_CAMERA_MODULE}.ClassifierClient"),
             patch(f"{_CAMERA_MODULE}.threading.Thread") as mock_thread_cls,
             patch(f"{_CAMERA_MODULE}.queue.Queue") as mock_queue_cls,
         ):
@@ -90,6 +96,7 @@ class TestCaptureFromWebcam:
             patch(f"{_CAMERA_MODULE}.cv2.namedWindow"),
             patch(f"{_CAMERA_MODULE}.cv2.imshow"),
             patch(f"{_CAMERA_MODULE}.cv2.destroyAllWindows"),
+            patch(f"{_CAMERA_MODULE}.ClassifierClient"),
             patch(f"{_CAMERA_MODULE}.threading.Thread") as mock_thread_cls,
         ):
             mock_thread = MagicMock()
@@ -100,7 +107,7 @@ class TestCaptureFromWebcam:
 
 
 class TestClassifyWorker:
-    """Tests for the background classification thread."""
+    """Tests for the background classification worker thread."""
 
     @staticmethod
     def _make_frame() -> NDArray[np.uint8]:
@@ -114,17 +121,26 @@ class TestClassifyWorker:
         q.put(frame)
         q.put(None)  # sentinel to stop
 
-        annotated = self._make_frame()
-        with (
-            patch(f"{_CAMERA_MODULE}.classify_food", return_value=("Pizza", 0.95)) as mock_classify,
-            patch(f"{_CAMERA_MODULE}.annotate_image", return_value=annotated) as mock_annotate,
-            patch(f"{_CAMERA_MODULE}.save_frame", return_value=tmp_path / "test.png") as mock_save,
-        ):
-            _classify_worker(q)
+        mock_client = MagicMock()
+        mock_submission = MagicMock()
+        mock_submission.job_id = "job1"
+        mock_client.submit.return_value = mock_submission
 
-        mock_classify.assert_called_once()
-        mock_annotate.assert_called_once_with(frame, "Pizza", 0.95)
-        mock_save.assert_called_once_with(annotated)
+        # Create a valid PNG to return as annotated image
+        import cv2
+        ok, buf = cv2.imencode(".png", frame)
+        annotated_bytes = buf.tobytes()
+
+        mock_job = MagicMock()
+        mock_job.label = "Pizza"
+        mock_job.confidence = 0.95
+        mock_client.wait_for_result.return_value = (annotated_bytes, mock_job)
+
+        with patch(f"{_CAMERA_MODULE}.save_frame", return_value=tmp_path / "test.png"):
+            _classify_worker(q, mock_client)
+
+        mock_client.submit.assert_called_once()
+        mock_client.wait_for_result.assert_called_once_with("job1", timeout=120.0)
 
     def test_save_failure_prints_error(
         self, capsys: pytest.CaptureFixture[str],
@@ -132,19 +148,29 @@ class TestClassifyWorker:
         import queue as _queue
 
         q: _queue.Queue[NDArray[np.uint8] | None] = _queue.Queue()
-        q.put(self._make_frame())
+        frame = self._make_frame()
+        q.put(frame)
         q.put(None)
 
-        with (
-            patch(f"{_CAMERA_MODULE}.classify_food", return_value=("Pizza", 0.95)),
-            patch(f"{_CAMERA_MODULE}.annotate_image", return_value=self._make_frame()),
-            patch(f"{_CAMERA_MODULE}.save_frame", return_value=None),
-        ):
-            _classify_worker(q)
+        mock_client = MagicMock()
+        mock_submission = MagicMock()
+        mock_submission.job_id = "job1"
+        mock_client.submit.return_value = mock_submission
+
+        import cv2
+        ok, buf = cv2.imencode(".png", frame)
+
+        mock_job = MagicMock()
+        mock_job.label = "Pizza"
+        mock_job.confidence = 0.95
+        mock_client.wait_for_result.return_value = (buf.tobytes(), mock_job)
+
+        with patch(f"{_CAMERA_MODULE}.save_frame", return_value=None):
+            _classify_worker(q, mock_client)
 
         assert "Error: could not write capture" in capsys.readouterr().err
 
-    def test_classification_exception_prints_error(
+    def test_wait_for_result_returns_none_prints_error(
         self, capsys: pytest.CaptureFixture[str],
     ) -> None:
         import queue as _queue
@@ -153,13 +179,31 @@ class TestClassifyWorker:
         q.put(self._make_frame())
         q.put(None)
 
-        with patch(
-            f"{_CAMERA_MODULE}.classify_food",
-            side_effect=RuntimeError("model exploded"),
-        ):
-            _classify_worker(q)
+        mock_client = MagicMock()
+        mock_submission = MagicMock()
+        mock_submission.job_id = "job1"
+        mock_client.submit.return_value = mock_submission
+        mock_client.wait_for_result.return_value = None
 
-        assert "Error during classification: model exploded" in capsys.readouterr().err
+        _classify_worker(q, mock_client)
+
+        assert "Error: classification timed out or failed" in capsys.readouterr().err
+
+    def test_exception_prints_error(
+        self, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        import queue as _queue
+
+        q: _queue.Queue[NDArray[np.uint8] | None] = _queue.Queue()
+        q.put(self._make_frame())
+        q.put(None)
+
+        mock_client = MagicMock()
+        mock_client.submit.side_effect = RuntimeError("network error")
+
+        _classify_worker(q, mock_client)
+
+        assert "Error during classification: network error" in capsys.readouterr().err
 
     def test_sentinel_stops_worker(self) -> None:
         import queue as _queue
@@ -167,8 +211,7 @@ class TestClassifyWorker:
         q: _queue.Queue[NDArray[np.uint8] | None] = _queue.Queue()
         q.put(None)
 
-        # Should return immediately without calling classify_food.
-        with patch(f"{_CAMERA_MODULE}.classify_food") as mock_classify:
-            _classify_worker(q)
+        mock_client = MagicMock()
+        _classify_worker(q, mock_client)
 
-        mock_classify.assert_not_called()
+        mock_client.submit.assert_not_called()

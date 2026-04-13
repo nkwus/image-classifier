@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import queue
 import sys
 import threading
@@ -10,19 +11,21 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
-from image_classifier.annotate import annotate_image
+from image_classifier.api_client import ClassifierClient
 from image_classifier.capture import save_frame
-from image_classifier.classify import classify_food
 
 WINDOW_NAME = "Webcam - press s=save  q=quit"
 
 _SENTINEL = None  # Pushed to signal the worker thread to exit.
 
+_DEFAULT_API_URL = "http://127.0.0.1:8000"
+
 
 def _classify_worker(
     q: queue.Queue[NDArray[np.uint8] | None],
+    client: ClassifierClient,
 ) -> None:
-    """Background thread that classifies and saves frames from *q*.
+    """Background thread that submits frames to the API and saves results.
 
     Runs until it dequeues the ``_SENTINEL`` value.
     """
@@ -31,9 +34,33 @@ def _classify_worker(
         if frame is _SENTINEL:
             break
         try:
-            label, confidence = classify_food(frame)
-            annotated = annotate_image(frame, label, confidence)
+            # Encode the frame as PNG bytes for submission.
+            ok, encoded = cv2.imencode(".png", frame)
+            if not ok:
+                print("Error: could not encode frame", file=sys.stderr)
+                continue
+            image_bytes: bytes = encoded.tobytes()
+
+            submission = client.submit(image_bytes)
+            job_id = submission.job_id
+            print(f"Job {job_id}: submitted, waiting for result…")
+
+            result = client.wait_for_result(job_id, timeout=120.0)
+            if result is None:
+                print("Error: classification timed out or failed", file=sys.stderr)
+                continue
+
+            annotated_bytes, job = result
+            # Decode the annotated PNG back to a numpy array for saving.
+            buf = np.frombuffer(annotated_bytes, dtype=np.uint8)
+            annotated = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+            if annotated is None:
+                print("Error: could not decode annotated image", file=sys.stderr)
+                continue
+
             output_path = save_frame(annotated)
+            label = job.label or "Unknown"
+            confidence = job.confidence or 0.0
             if output_path is not None:
                 print(f"Saved: {output_path} — {label} ({confidence:.1%})")
             else:
@@ -42,12 +69,18 @@ def _classify_worker(
             print(f"Error during classification: {exc}", file=sys.stderr)
 
 
-def capture_from_webcam(device: int = 0) -> None:
+def capture_from_webcam(
+    device: int = 0,
+    api_url: str | None = None,
+) -> None:
     """Open a live webcam preview window.
 
     Press **s** to enqueue the current frame for classification (runs in
-    a background thread), **q** to quit.
+    a background thread via the API), **q** to quit.
     """
+    if api_url is None:
+        api_url = os.environ.get("CLASSIFIER_API_URL", _DEFAULT_API_URL)
+
     cap = cv2.VideoCapture(device)
     if not cap.isOpened():
         print(f"Error: could not open camera (device {device}).", file=sys.stderr)
@@ -55,13 +88,12 @@ def capture_from_webcam(device: int = 0) -> None:
 
     print("Webcam open. Press 's' to save a PNG, 'q' to quit.")
 
-    # WINDOW_GUI_NORMAL avoids the Qt-based highgui rendering path, which can
-    # produce a black preview under XWayland.
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_GUI_NORMAL)
 
+    client = ClassifierClient(api_url)
     classify_queue: queue.Queue[NDArray[np.uint8] | None] = queue.Queue()
     worker = threading.Thread(
-        target=_classify_worker, args=(classify_queue,), daemon=True,
+        target=_classify_worker, args=(classify_queue, client), daemon=True,
     )
     worker.start()
 
@@ -85,5 +117,6 @@ def capture_from_webcam(device: int = 0) -> None:
     finally:
         classify_queue.put(_SENTINEL)
         worker.join()
+        client.close()
         cap.release()
         cv2.destroyAllWindows()

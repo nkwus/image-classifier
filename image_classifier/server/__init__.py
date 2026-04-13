@@ -1,0 +1,1 @@
+"""FastAPI classification server package."""
