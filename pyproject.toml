@@ -1,7 +1,22 @@
 [project]
 name = "image-classifier"
 version = "0.1.0"
-description = "Add your description here"
+description = "Webcam capture and image saving utilities"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "opencv-python>=4.10",
+]
+
+[project.scripts]
+image-classifier = "image_classifier._cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=6.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
