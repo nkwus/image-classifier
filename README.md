@@ -121,6 +121,37 @@ pyproject.toml            Package metadata, dependencies, build config
 .env                      API keys and Redis credentials (git-ignored)
 ```
 
+## How classification works
+
+### The model: SigLIP (google/siglip-so400m-patch14-384)
+
+This project uses Google's **SigLIP** (Sigmoid Loss for Language-Image Pre-training) vision-language model, specifically the [`google/siglip-so400m-patch14-384`](https://huggingface.co/google/siglip-so400m-patch14-384) checkpoint hosted on Hugging Face.
+
+SigLIP is a **vision-language model** — it was trained on hundreds of millions of image–text pairs so that it learns a shared embedding space for images and text. Given an image and a list of text strings ("candidate labels"), SigLIP scores how well each label matches the image. This is called **zero-shot image classification** because the model was never explicitly trained on those specific labels — it generalises from its language understanding.
+
+**Why SigLIP instead of a fine-tuned classifier?** A fine-tuned model (e.g. a ViT trained on the Food-101 dataset) can only predict the exact classes it was trained on. If you show it a food that wasn't in its training set, it will confidently pick the closest wrong answer. SigLIP, by contrast, can classify against *any* set of text labels you provide at runtime — no retraining needed. The trade-off is model size (~3.5 GB vs ~330 MB for a fine-tuned ViT) and slightly higher latency.
+
+The model is loaded via the HuggingFace `transformers` library as a `"zero-shot-image-classification"` pipeline (see [classify.py](image_classifier/classify.py#L66)). It is downloaded from Hugging Face Hub on first use and cached locally.
+
+### Why candidate labels are required (and what happens without them)
+
+Zero-shot classification does **not** generate a label from thin air. It **compares** the image against every label in a provided list and returns the best match with a confidence score. Without a list of candidate labels, the model has nothing to compare against and cannot produce any output.
+
+This is fundamentally different from an image captioning model (which generates free-form text) or a fine-tuned classifier (which has labels baked into its final layer). Zero-shot classification is essentially a ranked similarity search: "which of these N text descriptions best matches this image?"
+
+The quality of results depends directly on the candidate labels:
+- **Too few labels** — the model is forced to pick from a limited set, so it may assign a confident but wrong label (e.g. if you only provide `["pizza", "sushi"]` and show it a hamburger, it will pick whichever of those two is closest).
+- **Too many labels** — accuracy improves (the correct label is more likely to be present) but classification slows down because the model must score every candidate. With thousands of labels, the pipeline batches them (100 per batch) to avoid GPU out-of-memory errors.
+- **Missing the correct label** — the model will always return *something* from the list, even if the true food isn't present. It cannot say "none of the above".
+
+### Where the labels come from
+
+1. **Built-in Food-101 list** — [classify.py](image_classifier/classify.py#L19) ships with ~110 hard-coded labels (the standard Food-101 categories plus coffee, tea, soda, and a few extras). This is the fallback when no USDA cache exists.
+
+2. **USDA FoodData Central** — The [USDA FoodData Central API](https://fdc.nal.usda.gov/api-guide) publishes thousands of curated, human-readable food descriptions (e.g. "strawberries, raw", "cheese, cheddar") under a public-domain CC0 licence. Running `uv run image-classifier --fetch-labels` downloads these descriptions and caches them as JSON at `~/.cache/image-classifier/usda_labels.json`. Once cached, they are automatically used as the candidate label set, giving much broader food coverage than the 110-item fallback.
+
+3. **Custom labels at runtime** — You can pass any list you want via the `candidate_labels` parameter to `classify_food()` (e.g. `["espresso", "latte", "cappuccino"]` for a coffee-specific classifier).
+
 ## Design decisions
 
 ### Why split into multiple modules?
